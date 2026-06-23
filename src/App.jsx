@@ -34,13 +34,13 @@ export default function App() {
   const [budgetInputs, setBudgetInputs] = useState(budgets)
   const [addedMsg, setAddedMsg] = useState(false)
   const [screenshotDrag, setScreenshotDrag] = useState(false)
+  const [reviewQueue, setReviewQueue] = useState([]) // uncategorized txns pending review
 
   function saveTxns(txns) {
     setTransactions(txns)
     localStorage.setItem('paisa_txns', JSON.stringify(txns))
   }
 
-  // Convert image file to base64
   async function fileToBase64(file) {
     return new Promise((res, rej) => {
       const r = new FileReader()
@@ -50,7 +50,15 @@ export default function App() {
     })
   }
 
-  // Extract transactions from screenshot using Claude vision
+  async function callClaude(body) {
+    const res = await fetch('/api/claude', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    })
+    return res.json()
+  }
+
   async function extractFromScreenshot(file) {
     setLoading(true)
     setLoadingMsg('Reading your screenshot…')
@@ -58,118 +66,105 @@ export default function App() {
     try {
       const base64 = await fileToBase64(file)
       const mediaType = file.type || 'image/png'
-
       setLoadingMsg('Claude is extracting transactions…')
 
-      const res = await fetch('/api/claude', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          model: 'claude-sonnet-4-6',
-          max_tokens: 2000,
-          messages: [{
-            role: 'user',
-            content: [
-              {
-                type: 'image',
-                source: { type: 'base64', media_type: mediaType, data: base64 }
-              },
-              {
-                type: 'text',
-                text: `This is a screenshot of a payment app transaction history (like Google Pay, PhonePe, Paytm, or a bank statement).
+      const data = await callClaude({
+        model: 'claude-sonnet-4-6',
+        max_tokens: 2000,
+        messages: [{
+          role: 'user',
+          content: [
+            { type: 'image', source: { type: 'base64', media_type: mediaType, data: base64 } },
+            {
+              type: 'text',
+              text: `Extract ALL transactions from this payment app screenshot. For each transaction identify date (YYYY-MM-DD), description, amount (outgoing only, number), and category.
 
-Extract ALL transactions you can see. For each transaction identify:
-1. date (YYYY-MM-DD format, use current year if not shown)
-2. description (merchant name or transaction description)
-3. amount (number only, in rupees, only outgoing/debit amounts)
-4. category - classify into exactly one of: Needs, Wants, Rent, Investments
+Category rules — only categorize if you're CONFIDENT based on the merchant/app name:
+- Needs: Blinkit, BigBasket, DMart, pharmacy names, hospital names, utilities, fuel, groceries
+- Wants: Zomato, Swiggy, Netflix, Spotify, Amazon, Myntra, cinema, salon, Uber, Ola, restaurants
+- Rent: "rent", "EMI", "maintenance", "society", housing loan keywords
+- Investments: Zerodha, Groww, MF, SIP, mutual fund, insurance premium, FD
+- "uncategorized": if the description is just a person's name or unclear
 
-Category rules:
-- Needs: groceries, pharmacy, hospital, utilities, fuel, school fees, essential food
-- Wants: restaurants, Zomato, Swiggy, shopping, Netflix, entertainment, salon, travel, clothes, food delivery
-- Rent: rent, EMI, housing loan, PG, society maintenance
-- Investments: Zerodha, mutual fund, SIP, stocks, Groww, gold, FD, insurance premium
-
-Reply ONLY with a valid JSON array, no other text:
-[{"date":"2025-01-15","description":"Zomato","amount":450,"category":"Wants"},...]
-
-If you cannot find any transactions, return an empty array: []`
-              }
-            ]
-          }]
-        })
+Reply ONLY with JSON array: [{"date":"2026-05-01","description":"Zomato","amount":450,"category":"Wants"},...]
+If no transactions found, return []`
+            }
+          ]
+        }]
       })
 
-      const data = await res.json()
       const text = data.content?.map(c => c.text || '').join('') || '[]'
-
-      setLoadingMsg('Processing results…')
-
       let parsed = []
-      try {
-        const clean = text.replace(/```json|```/g, '').trim()
-        parsed = JSON.parse(clean)
-      } catch {
-        setUploadMsg('Could not read transactions from screenshot. Try a clearer image.')
-        setLoading(false)
-        return
-      }
+      try { parsed = JSON.parse(text.replace(/```json|```/g, '').trim()) } catch { }
 
       if (!parsed.length) {
-        setUploadMsg('No transactions found in screenshot. Make sure the image shows transaction amounts and names clearly.')
+        setUploadMsg('No transactions found. Try a clearer image.')
         setLoading(false)
         return
       }
 
-      const newTxns = parsed.map((r, i) => ({
-        id: Date.now() + i,
+      processExtractedRows(parsed.map(r => ({
         date: r.date || new Date().toISOString().slice(0, 10),
         description: r.description || 'Unknown',
         amount: parseFloat(r.amount) || 0,
-        cat: r.category || 'Wants',
-        mode: 'UPI'
-      })).filter(t => t.amount > 0)
+        cat: r.category || 'uncategorized'
+      })).filter(t => t.amount > 0))
 
-      saveTxns([...newTxns, ...transactions])
-      setUploadMsg(`✓ Extracted ${newTxns.length} transactions from screenshot`)
-      setTab('dashboard')
     } catch (e) {
-      setUploadMsg('Error processing screenshot. Please try again.')
+      setUploadMsg('Error: ' + (e?.message || String(e)))
     }
     setLoading(false)
     setLoadingMsg('')
   }
 
   async function categorizeWithClaude(rows) {
-    const prompt = `You are a personal finance categorizer for Indian users. Categorize each transaction into exactly one of: Needs, Wants, Rent, Investments.
+    const data = await callClaude({
+      model: 'claude-sonnet-4-6',
+      max_tokens: 1000,
+      messages: [{
+        role: 'user',
+        content: `Categorize each transaction for an Indian user. Use exactly one of: Needs, Wants, Rent, Investments, uncategorized.
 
 Rules:
-- Needs: groceries, pharmacy, hospital, utilities, fuel, school fees, essential food
-- Wants: restaurants, Zomato, Swiggy, shopping, Netflix, entertainment, salon, travel, clothes
-- Rent: rent, EMI, housing loan, PG, society maintenance
-- Investments: Zerodha, mutual fund, SIP, stocks, Groww, gold, FD, insurance premium
+- Needs: Blinkit, BigBasket, pharmacy, hospital, utilities, fuel, groceries, essential food
+- Wants: Zomato, Swiggy, Netflix, Spotify, Uber, Ola, cinema, salon, shopping apps, restaurants, Starbucks, brands like Nike/H&M/Lacoste
+- Rent: rent, EMI, housing, society, maintenance, PG
+- Investments: Zerodha, Groww, mutual fund, SIP, stocks, FD, insurance premium
+- uncategorized: just a person's name (like "Rahul Kumar", "ANJANA SHARMA"), or completely unclear merchant
 
 Transactions:
 ${rows.map((r, i) => `${i + 1}. "${r.description}" Rs.${r.amount}`).join('\n')}
 
-Reply ONLY with a JSON array of category strings in the same order. Example: ["Needs","Wants","Rent"]`
-
-    const res = await fetch('/api/claude', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model: 'claude-sonnet-4-6',
-        max_tokens: 1000,
-        messages: [{ role: 'user', content: prompt }]
-      })
+Reply ONLY with a JSON array of strings: ["Wants","uncategorized","Needs",...]`
+      }]
     })
-    const data = await res.json()
     const text = data.content?.map(c => c.text || '').join('') || '[]'
-    try {
-      const clean = text.replace(/```json|```/g, '').trim()
-      return JSON.parse(clean)
-    } catch {
-      return rows.map(() => 'Wants')
+    try { return JSON.parse(text.replace(/```json|```/g, '').trim()) }
+    catch { return rows.map(() => 'uncategorized') }
+  }
+
+  function processExtractedRows(rows) {
+    const newTxns = rows.map((r, i) => ({
+      id: Date.now() + i,
+      date: r.date,
+      description: r.description,
+      amount: r.amount,
+      cat: r.cat,
+      mode: 'UPI'
+    }))
+
+    const uncategorized = newTxns.filter(t => t.cat === 'uncategorized')
+    const categorized = newTxns.filter(t => t.cat !== 'uncategorized')
+
+    saveTxns([...categorized, ...transactions])
+
+    if (uncategorized.length > 0) {
+      setReviewQueue(uncategorized)
+      setTab('review')
+      setUploadMsg('')
+    } else {
+      setUploadMsg(`✓ Imported ${newTxns.length} transactions`)
+      setTab('dashboard')
     }
   }
 
@@ -183,18 +178,14 @@ Reply ONLY with a JSON array of category strings in the same order. Example: ["N
       const ws = wb.Sheets[wb.SheetNames[0]]
       const raw = XLSX.utils.sheet_to_json(ws, { header: 1 })
       const header = raw[0]?.map(h => String(h || '').toLowerCase())
+
       const dateIdx = header?.findIndex(h => h.includes('date') || h === 'dt')
-      const descIdx = header?.findIndex(h => h.includes('desc') || h.includes('note') || h.includes('narr') || h.includes('particular') || h.includes('paid to') || h.includes('merchant') || h.includes('name'))
+      const descIdx = header?.findIndex(h => h.includes('desc') || h.includes('note') || h.includes('narr') || h.includes('particular') || h.includes('paid') || h.includes('merchant') || h.includes('name'))
       const amtIdx = header?.findIndex(h => h.includes('amount') || h.includes('debit') || h.includes('amt') || h === 'rs')
 
       const finalDate = dateIdx !== -1 ? dateIdx : 0
       const finalDesc = descIdx !== -1 ? descIdx : 1
       const finalAmt = amtIdx !== -1 ? amtIdx : 2
-      if (false) {
-        setUploadMsg('Could not find Date, Description, Amount columns. Check your Excel format.')
-        setLoading(false)
-        return
-      }
 
       const rows = raw.slice(1)
         .filter(r => r[finalAmt] && parseFloat(r[finalAmt]) > 0)
@@ -206,25 +197,19 @@ Reply ONLY with a JSON array of category strings in the same order. Example: ["N
         .filter(r => r.description && r.amount > 0)
 
       if (!rows.length) {
-        setUploadMsg('No valid transactions found. Check your file.')
+        setUploadMsg('No valid transactions found.')
         setLoading(false)
         return
       }
 
-      setLoadingMsg('Claude is categorizing transactions…')
+      setLoadingMsg(`Categorizing ${rows.length} transactions…`)
       const cats = await categorizeWithClaude(rows)
-      const newTxns = rows.map((r, i) => ({
-        id: Date.now() + i,
-        date: r.date,
-        description: r.description,
-        amount: r.amount,
-        cat: cats[i] || 'Wants',
-        mode: 'UPI'
-      }))
 
-      saveTxns([...newTxns, ...transactions])
-      setUploadMsg(`✓ Imported ${newTxns.length} transactions`)
-      setTab('dashboard')
+      processExtractedRows(rows.map((r, i) => ({
+        ...r,
+        cat: cats[i] || 'uncategorized'
+      })))
+
     } catch (e) {
       setUploadMsg('Error: ' + (e?.message || String(e)))
     }
@@ -234,18 +219,14 @@ Reply ONLY with a JSON array of category strings in the same order. Example: ["N
 
   function handleFile(file) {
     if (!file) return
-    if (file.type.startsWith('image/')) {
-      extractFromScreenshot(file)
-    } else {
-      processExcel(file)
-    }
+    if (file.type.startsWith('image/')) extractFromScreenshot(file)
+    else processExcel(file)
   }
 
   function onDrop(e) {
     e.preventDefault()
     setDragOver(false)
-    const file = e.dataTransfer?.files[0] || e.target.files?.[0]
-    handleFile(file)
+    handleFile(e.dataTransfer?.files[0] || e.target.files?.[0])
   }
 
   function addManual() {
@@ -261,6 +242,21 @@ Reply ONLY with a JSON array of category strings in the same order. Example: ["N
     setManualForm(f => ({ ...f, desc: '', amount: '' }))
     setAddedMsg(true)
     setTimeout(() => setAddedMsg(false), 1500)
+  }
+
+  function assignReviewCat(id, cat) {
+    const txn = reviewQueue.find(t => t.id === id)
+    if (!txn) return
+    saveTxns([{ ...txn, cat }, ...transactions])
+    const remaining = reviewQueue.filter(t => t.id !== id)
+    setReviewQueue(remaining)
+    if (remaining.length === 0) setTab('dashboard')
+  }
+
+  function skipAll() {
+    saveTxns([...reviewQueue.map(t => ({ ...t, cat: 'Wants' })), ...transactions])
+    setReviewQueue([])
+    setTab('dashboard')
   }
 
   function deleteTxn(id) { saveTxns(transactions.filter(t => t.id !== id)) }
@@ -283,19 +279,53 @@ Reply ONLY with a JSON array of category strings in the same order. Example: ["N
         <div className="logo">paisa<span className="dot">.</span></div>
         <nav className="nav">
           {[['upload', 'Import'], ['dashboard', 'Dashboard'], ['transactions', 'Transactions'], ['budget', 'Budget']].map(([id, label]) => (
-            <button key={id} className={'nav-btn' + (tab === id ? ' active' : '')} onClick={() => setTab(id)}>{label}</button>
+            <button key={id} className={'nav-btn' + (tab === id ? ' active' : '')} onClick={() => setTab(id)}>{label}
+              {id === 'upload' && reviewQueue.length > 0 && <span className="badge">{reviewQueue.length}</span>}
+            </button>
           ))}
         </nav>
       </header>
 
       <main className="main">
 
+        {/* REVIEW TAB */}
+        {tab === 'review' && (
+          <div className="section">
+            <h1 className="page-title">Review transactions</h1>
+            <p className="page-sub">Claude couldn't confidently categorize these — they look like person-to-person payments. Tap the right category for each.</p>
+            <div className="review-stats">
+              <span>{reviewQueue.length} remaining</span>
+              <button className="skip-btn" onClick={skipAll}>Skip all → Wants</button>
+            </div>
+            <div className="review-list">
+              {reviewQueue.map(t => (
+                <div className="review-card" key={t.id}>
+                  <div className="review-top">
+                    <div>
+                      <div className="review-desc">{t.description}</div>
+                      <div className="review-meta">{t.date} · {fmt(t.amount)}</div>
+                    </div>
+                    <div className="review-amount">{fmt(t.amount)}</div>
+                  </div>
+                  <div className="review-cats">
+                    {CATEGORIES.map(c => (
+                      <button key={c} className="cat-btn" style={{ borderColor: CAT_COLORS[c], color: CAT_COLORS[c] }}
+                        onClick={() => assignReviewCat(t.id, c)}>
+                        {CAT_EMOJI[c]} {c}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
         {tab === 'upload' && (
           <div className="section">
             <h1 className="page-title">Import transactions</h1>
-            <p className="page-sub">Upload a screenshot of your GPay history — Claude reads it and categorizes everything instantly.</p>
+            <p className="page-sub">Upload a GPay screenshot or Excel file. Claude categorizes what it can — you review the rest.</p>
 
-            {/* Screenshot upload - primary */}
             <div
               className={'dropzone screenshot-zone' + (screenshotDrag ? ' drag-over' : '')}
               onDragOver={e => { e.preventDefault(); setScreenshotDrag(true) }}
@@ -312,7 +342,7 @@ Reply ONLY with a JSON array of category strings in the same order. Example: ["N
                 <>
                   <div className="drop-icon">📸</div>
                   <div className="drop-text">Upload GPay / PhonePe screenshot</div>
-                  <div className="drop-sub">Claude will extract and categorize all transactions automatically</div>
+                  <div className="drop-sub">Claude extracts and categorizes all transactions</div>
                   <div className="upload-btn">Choose screenshot</div>
                 </>
               )}
@@ -323,7 +353,6 @@ Reply ONLY with a JSON array of category strings in the same order. Example: ["N
 
             <div className="divider"><span>or upload Excel</span></div>
 
-            {/* Excel upload - secondary */}
             <div
               className={'dropzone excel-zone' + (dragOver ? ' drag-over' : '')}
               onDragOver={e => { e.preventDefault(); setDragOver(true) }}
@@ -379,7 +408,7 @@ Reply ONLY with a JSON array of category strings in the same order. Example: ["N
                 </div>
 
                 <div className="card">
-                  <div class="card-title">Spending breakdown</div>
+                  <div className="card-title">Spending breakdown</div>
                   <div className="chart-row">
                     <ResponsiveContainer width="55%" height={200}>
                       <PieChart>
@@ -431,12 +460,12 @@ Reply ONLY with a JSON array of category strings in the same order. Example: ["N
               <div className="txn-list">
                 {transactions.map(t => (
                   <div className="txn" key={t.id}>
-                    <div className="txn-icon" style={{ background: CAT_BG[t.cat] }}>{CAT_EMOJI[t.cat]}</div>
+                    <div className="txn-icon" style={{ background: CAT_BG[t.cat] || '#f0ede8' }}>{CAT_EMOJI[t.cat] || '❓'}</div>
                     <div className="txn-info">
                       <div className="txn-desc">{t.description}</div>
                       <div className="txn-meta">{t.date} · {t.mode}</div>
                     </div>
-                    <select className="cat-select" value={t.cat} onChange={e => updateCat(t.id, e.target.value)} style={{ color: CAT_COLORS[t.cat] }}>
+                    <select className="cat-select" value={t.cat} onChange={e => updateCat(t.id, e.target.value)} style={{ color: CAT_COLORS[t.cat] || '#888' }}>
                       {CATEGORIES.map(c => <option key={c}>{c}</option>)}
                     </select>
                     <div className="txn-amount">{fmt(t.amount)}</div>
