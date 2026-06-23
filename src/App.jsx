@@ -183,22 +183,25 @@ Reply ONLY with a JSON array of category strings in the same order. Example: ["N
       const ws = wb.Sheets[wb.SheetNames[0]]
       const raw = XLSX.utils.sheet_to_json(ws, { header: 1 })
       const header = raw[0]?.map(h => String(h || '').toLowerCase())
-      const dateIdx = header?.findIndex(h => h.includes('date'))
-      const descIdx = header?.findIndex(h => h.includes('desc') || h.includes('note') || h.includes('narr') || h.includes('particular'))
-      const amtIdx = header?.findIndex(h => h.includes('amount') || h.includes('debit') || h.includes('amt'))
+      const dateIdx = header?.findIndex(h => h.includes('date') || h === 'dt')
+      const descIdx = header?.findIndex(h => h.includes('desc') || h.includes('note') || h.includes('narr') || h.includes('particular') || h.includes('paid to') || h.includes('merchant') || h.includes('name'))
+      const amtIdx = header?.findIndex(h => h.includes('amount') || h.includes('debit') || h.includes('amt') || h === 'rs')
 
-      if (dateIdx === -1 || descIdx === -1 || amtIdx === -1) {
+      const finalDate = dateIdx !== -1 ? dateIdx : 0
+      const finalDesc = descIdx !== -1 ? descIdx : 1
+      const finalAmt = amtIdx !== -1 ? amtIdx : 2
+      if (false) {
         setUploadMsg('Could not find Date, Description, Amount columns. Check your Excel format.')
         setLoading(false)
         return
       }
 
       const rows = raw.slice(1)
-        .filter(r => r[amtIdx] && parseFloat(r[amtIdx]) > 0)
+        .filter(r => r[finalAmt] && parseFloat(r[finalAmt]) > 0)
         .map(r => ({
-          date: parseDate(r[dateIdx]),
-          description: String(r[descIdx] || '').trim(),
-          amount: parseFloat(r[amtIdx]) || 0
+          date: parseDate(r[finalDate]),
+          description: String(r[finalDesc] || '').trim(),
+          amount: parseFloat(r[finalAmt]) || 0
         }))
         .filter(r => r.description && r.amount > 0)
 
