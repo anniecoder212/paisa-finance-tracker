@@ -61,7 +61,7 @@ export default function App() {
 
       setLoadingMsg('Claude is extracting transactions…')
 
-      const res = await fetch('https://api.anthropic.com/v1/messages', {
+      const res = await fetch('/api/claude', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -154,7 +154,7 @@ ${rows.map((r, i) => `${i + 1}. "${r.description}" Rs.${r.amount}`).join('\n')}
 
 Reply ONLY with a JSON array of category strings in the same order. Example: ["Needs","Wants","Rent"]`
 
-    const res = await fetch('https://api.anthropic.com/v1/messages', {
+    const res = await fetch('/api/claude', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
