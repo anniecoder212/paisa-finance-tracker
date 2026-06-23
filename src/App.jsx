@@ -226,7 +226,7 @@ Reply ONLY with a JSON array of category strings in the same order. Example: ["N
       setUploadMsg(`✓ Imported ${newTxns.length} transactions`)
       setTab('dashboard')
     } catch (e) {
-      setUploadMsg('Error reading file. Make sure it is a valid .xlsx file.')
+      setUploadMsg('Error: ' + (e?.message || String(e)))
     }
     setLoading(false)
     setLoadingMsg('')
